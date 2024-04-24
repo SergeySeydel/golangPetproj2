@@ -96,7 +96,7 @@ func (a *App) getTaskHandlerByTag(w http.ResponseWriter, r *http.Request) {
 	var task Task
 	vars := mux.Vars(r)
 
-	// Select the task with the given id, and convert to JSON.
+	
 	err := a.DB.Where(&task, "tags = ?", vars["tag"])
 	if err.Error != nil {
 		http.Error(w, "error: tag not found in DataBase", http.StatusNotFound)
@@ -104,7 +104,6 @@ func (a *App) getTaskHandlerByTag(w http.ResponseWriter, r *http.Request) {
 	}
 	taskJSON, _ := json.Marshal(task)
 
-	// Write to HTTP response.
 	w.WriteHeader(200)
 	w.Write([]byte(taskJSON))
 }
@@ -112,7 +111,6 @@ func (a *App) getTaskHandlerByTag(w http.ResponseWriter, r *http.Request) {
 func (a *App) deleteTaskHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 
-	// Delete the task with the given id.
 	err := a.DB.Where("id = ?", vars["id"]).Delete(Task{})
 	if err.Error != nil {
 		http.Error(w, "error: id not found in DataBase", http.StatusNotFound)
@@ -120,7 +118,7 @@ func (a *App) deleteTaskHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write to HTTP response.
+	
 	w.WriteHeader(204)
 }
 
@@ -132,7 +130,7 @@ func (a *App) deleteAllTaskHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write to HTTP response.
+	
 	w.WriteHeader(204)
 }
 
