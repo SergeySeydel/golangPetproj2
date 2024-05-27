@@ -91,7 +91,10 @@ func (ts *taskServer) createTaskHandler(w http.ResponseWriter, r *http.Request) 
 
 	// Для ответа в виде JSON
 	type ResponseId struct {
-		Id int `json:"id"`
+		Id   int       `json:"id"`
+		Text string    `json:"text"`
+		Tags []string  `json:"tags"`
+		Due  time.Time `json:"due"`
 	}
 
 	// JSON в качестве Content-Type
@@ -118,7 +121,7 @@ func (ts *taskServer) createTaskHandler(w http.ResponseWriter, r *http.Request) 
 	id := ts.store.CreateTask(rt.Text, rt.Tags, rt.Due)
 
 	// Создаем json для ответа
-	js, err := json.Marshal(ResponseId{Id: id})
+	js, err := json.Marshal(ResponseId{Id: id, Text: rt.Text, Tags: rt.Tags, Due: rt.Due})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
 		return
@@ -141,7 +144,6 @@ func (ts *taskServer) getAllTaskHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Обязательно вносим изменения в Header до вызова метода Write()!
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(js)
 }
