@@ -1,183 +1,256 @@
+/*
+// Пример REST сервера с несколькими маршрутами(используем только стандартную библиотеку)
+
+// POST   /task/              :  создаёт задачу и возвращает её ID
+// GET    /task/<taskid>      :  возвращает одну задачу по её ID
+// GET    /task/              :  возвращает все задачи
+// DELETE /task/<taskid>      :  удаляет задачу по ID
+// DELETE /task/              :  удаляет все задачи
+// GET    /tag/<tagname>      :  возвращает список задач с заданным тегом
+// GET    /due/<yy>/<mm>/<dd> :  возвращает список задач, запланированных на указанную дату
+
+*/
+
 package main
 
 import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"mime"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
+	"proj/internal/taskstore"
 
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
+	"github.com/gorilla/mux"
 )
 
-type Task struct {
-	Id   int       `json:"id"`
-	Text string    `json:"text"`
-	Tags []string  `gorm:"serializer:json"`
-	Due  time.Time `json:"due"`
+type taskServer struct {
+	store *taskstore.TaskStore
 }
 
-type App struct {
-	DB *gorm.DB
+func NewTaskServer() *taskServer {
+	store := taskstore.New()
+	log.Printf("NewTaskServer Constructor started\n")
+	return &taskServer{store: store}
 }
 
-func (a *App) Initialize(dbURI string) {
-	db, err := gorm.Open(sqlite.Open(dbURI), &gorm.Config{})
+func trimIDFromRequest(r *http.Request) (int, error) {
+	log.Printf("trimIDFromRequest started\n")
 
-	if err != nil {
-		panic("failed to connect database")
+	path := strings.Trim(r.URL.Path, "/")
+	pathParts := strings.Split(path, "/")
+	if len(pathParts) < 2 {
+		//http.Error(w, "expect 'task/<id>' in task handler", http.StatusBadRequest)
+		return 0, fmt.Errorf("expect 'task/<id>' in task handler")
 	}
-	a.DB = db
-
-	a.DB.AutoMigrate(&Task{})
+	id, err := strconv.Atoi(pathParts[1])
+	if err != nil {
+		//http.Error(w, err.Error(), http.StatusBadRequest)
+		return 0, err
+	}
+	log.Printf("trimIDFromRequest returned id: %d\n", id)
+	return id, nil
 }
 
-func (a *App) getAllTaskHandler(w http.ResponseWriter, r *http.Request) {
-	var tasks []Task
-
-	a.DB.Find(&tasks)
-	tasksJSON, _ := json.Marshal(tasks)
-
-	w.WriteHeader(200)
-	w.Write([]byte(tasksJSON))
-}
-
-func (a *App) getTaskHandler(w http.ResponseWriter, r *http.Request) {
-	var task Task
+func trimDateFromRequest(r *http.Request) (int, time.Month, int, error) {
 	vars := mux.Vars(r)
 
-	// Select the task with the given id, and convert to JSON.
-	result := a.DB.First(&task, "id = ?", vars["id"])
-	if result.RowsAffected == 0 {
-		http.Error(w, "error: id not found in DataBase", http.StatusNotFound)
-		return
+	year, err := strconv.Atoi(vars["year"])
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid year parameter")
 	}
-	taskJSON, _ := json.Marshal(task)
 
-	// Write to HTTP response.
-	w.WriteHeader(200)
-	w.Write([]byte(taskJSON))
+	monthInt, err := strconv.Atoi(vars["month"])
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid month parameter")
+	}
+	if monthInt < 1 || monthInt > 12 {
+		return 0, 0, 0, fmt.Errorf("invalid month parameter")
+	}
+	month := time.Month(monthInt)
+
+	day, err := strconv.Atoi(vars["day"])
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("invalid day parameter")
+	}
+
+	return year, month, day, nil
 }
 
-func (a *App) createTaskHandler(w http.ResponseWriter, r *http.Request) {
+func (ts *taskServer) createTaskHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Handling task create at %s\n", r.URL.Path)
-	var newTask Task
 
-	err := json.NewDecoder(r.Body).Decode(&newTask)
-	if err != nil {
-		w.WriteHeader(400)
-		return
+	// Структура для создания задачи
+	type RequestTask struct {
+		Text string    `json:"text"`
+		Tags []string  `json:"tags"`
+		Due  time.Time `json:"due"`
 	}
 
-	rows := a.DB.Create(&newTask).RowsAffected
-	log.Println("Added rows: ", rows)
-
-	// Создаем json для ответа
+	// Для ответа в виде JSON
 	type ResponseId struct {
 		Id int `json:"id"`
 	}
 
-	taskJSON, err := json.Marshal(ResponseId{Id: newTask.Id})
+	// JSON в качестве Content-Type
+	contentType := r.Header.Get("Content-Type")
+	mediatype, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		http.Error(w, "error: not create task", http.StatusInternalServerError)
-
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if mediatype != "application/json" {
+		http.Error(w, "expect application/json Content-Type", http.StatusUnsupportedMediaType)
 		return
 	}
 
+	// Обработка тела запроса
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var rt RequestTask
+	if err := dec.Decode(&rt); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	// Создаем новую задачу в хранилище и получаем ее <id>
+	id := ts.store.CreateTask(rt.Text, rt.Tags, rt.Due)
+
+	// Создаем json для ответа
+	js, err := json.Marshal(ResponseId{Id: id})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
+		return
+	}
+
+	// Обязательно вносим изменения в Header до вызова метода Write()!
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(201)
-	w.Write([]byte(taskJSON))
+	w.Write(js)
+
 }
 
-func (a *App) getTaskHandlerByTag(w http.ResponseWriter, r *http.Request) {
-	var task Task
-	vars := mux.Vars(r)
+func (ts *taskServer) getAllTaskHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Handling get all tasks at %s\n", r.URL.Path)
 
-	
-	err := a.DB.Where(&task, "tags = ?", vars["tag"])
-	if err.Error != nil {
-		http.Error(w, "error: tag not found in DataBase", http.StatusNotFound)
-		return
-	}
-	taskJSON, _ := json.Marshal(task)
+	allTasks := ts.store.GetAllTasks()
 
-	w.WriteHeader(200)
-	w.Write([]byte(taskJSON))
-}
-
-func (a *App) deleteTaskHandler(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-
-	err := a.DB.Where("id = ?", vars["id"]).Delete(Task{})
-	if err.Error != nil {
-		http.Error(w, "error: id not found in DataBase", http.StatusNotFound)
-
-		return
-	}
-
-	
-	w.WriteHeader(204)
-}
-
-func (a *App) deleteAllTaskHandler(w http.ResponseWriter, r *http.Request) {
-
-	err := a.DB.Exec("DELETE FROM tasks")
-	if err.Error != nil {
-		http.Error(w, "error: not create task", http.StatusInternalServerError)
-		return
-	}
-
-	
-	w.WriteHeader(204)
-}
-
-func (a *App) getTaskHandlerByDueDate(w http.ResponseWriter, r *http.Request) {
-	var tasks []Task
-	vars := mux.Vars(r)
-	year := vars["yy"]
-	month := vars["mm"]
-	day := vars["dd"]
-
-	dueDateStr := fmt.Sprintf("%s-%s-%s", year, month, day)
-	dueDateTime, err := time.Parse("2006-01-02", dueDateStr)
+	js, err := json.Marshal(allTasks)
 	if err != nil {
-		http.Error(w, "error: invalid date format", http.StatusBadRequest)
+		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
 		return
 	}
 
-	a.DB.Find(&tasks, "due = ?", dueDateTime)
-	tasksJSON, err := json.Marshal(tasks)
-	if err != nil {
-		http.Error(w, "error: failed to serialize tasks", http.StatusInternalServerError)
-		return
-	}
-
+	// Обязательно вносим изменения в Header до вызова метода Write()!
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(tasksJSON)
+	w.Write(js)
+}
+
+func (ts *taskServer) getTaskHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Handling get task at %s\n", r.URL.Path)
+
+	id, err := trimIDFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	task, err := ts.store.GetTask(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound) // код ошибки 404
+		return
+	}
+	js, err := json.Marshal(task)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
+		return
+	}
+
+	// Обязательно вносим изменения в Header до вызова метода Write()!
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
+}
+
+func (ts *taskServer) deleteTaskHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Handling delete task at %s\n", r.URL.Path)
+
+	id, err := trimIDFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	erro := ts.store.DeleteTask(id)
+	if erro != nil {
+		http.Error(w, erro.Error(), http.StatusNotFound) // код ошибки 404
+		return
+	}
+}
+
+func (ts *taskServer) deleteAllTaskHandler(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Handling delete all tasks at %s\n", r.URL.Path)
+
+	ts.store.DeleteAllTasks()
+}
+
+func (ts *taskServer) getTaskByDue(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Handling delete all tasks at %s\n", r.URL.Path)
+
+	year, month, day, err := trimDateFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Получение задач по указанной дате
+	allTasks := ts.store.GetTasksByDueDate(year, month, day)
+
+	// Преобразование задач в JSON
+	js, err := json.Marshal(allTasks)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
+		return
+	}
+
+	// Обязательно вносим изменения в Header до вызова метода Write()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
+}
+
+func (ts *taskServer) getTasksByTag(w http.ResponseWriter, r *http.Request) {
+	log.Printf("Handling get tasks by tag at %s\n", r.URL.Path)
+
+	vars := mux.Vars(r)
+	tag := vars["tagname"]
+
+	// Получение задач по указанному тегу
+	tagTasks := ts.store.GetTasksByTag(tag)
+
+	// Преобразование задач в JSON
+	js, err := json.Marshal(tagTasks)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
+		return
+	}
+
+	// Обязательно вносим изменения в Header до вызова метода Write()
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(js)
 }
 
 func main() {
-	a := &App{}
-	a.Initialize("tasks.db")
-
 	r := mux.NewRouter()
+	server := NewTaskServer()
 
-	r.HandleFunc("/task", a.getAllTaskHandler).Methods("GET")
-	r.HandleFunc("/task/{id}", a.getTaskHandler).Methods("GET")
-	r.HandleFunc("/task", a.createTaskHandler).Methods("POST")
-	r.HandleFunc("/task/{id}", a.deleteTaskHandler).Methods("DELETE")
-	r.HandleFunc("/task", a.deleteAllTaskHandler).Methods("DELETE")
-	r.HandleFunc("/due/{yy}/{mm}/{dd}", a.getTaskHandlerByDueDate).Methods("GET")
+	// Added routing for "/task/" URL
+	r.HandleFunc("/task/", server.createTaskHandler).Methods("POST")
+	r.HandleFunc("/task/", server.getAllTaskHandler).Methods("GET")
+	r.HandleFunc("/task/", server.deleteAllTaskHandler).Methods("DELETE")
+	r.HandleFunc("/task/{id:[0-9]+}", server.getTaskHandler).Methods("GET")
+	r.HandleFunc("/task/{id:[0-9]+}", server.deleteTaskHandler).Methods("DELETE")
+	r.HandleFunc("/task/{year:[0-9]+}/{month:[0-9]+}/{day:[0-9]+}", server.getTaskByDue).Methods("GET")
+	r.HandleFunc("/tag/{tagname}", server.getTasksByTag).Methods("GET")
 
-	r.HandleFunc("/task/tag/{tag}", a.getTaskHandlerByTag).Methods("GET")
-
-	http.Handle("/", r)
-	fmt.Println("Listening on 127.0.0.1:1234")
-	if err := http.ListenAndServe("127.0.0.1:1234", nil); err != nil {
-		panic(err)
-	}
+	log.Fatal(http.ListenAndServe("127.0.0.1:8080", r))
 }
