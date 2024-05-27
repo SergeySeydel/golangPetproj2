@@ -44,12 +44,10 @@ func trimIDFromRequest(r *http.Request) (int, error) {
 	path := strings.Trim(r.URL.Path, "/")
 	pathParts := strings.Split(path, "/")
 	if len(pathParts) < 2 {
-		//http.Error(w, "expect 'task/<id>' in task handler", http.StatusBadRequest)
 		return 0, fmt.Errorf("expect 'task/<id>' in task handler")
 	}
 	id, err := strconv.Atoi(pathParts[1])
 	if err != nil {
-		//http.Error(w, err.Error(), http.StatusBadRequest)
 		return 0, err
 	}
 	log.Printf("trimIDFromRequest returned id: %d\n", id)
@@ -204,7 +202,11 @@ func (ts *taskServer) getTaskByDue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Получение задач по указанной дате
-	allTasks := ts.store.GetTasksByDueDate(year, month, day)
+	allTasks, err := ts.store.GetDue(fmt.Sprintf("%d-%02d-%02d", year, month, day))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
+		return
+	}
 
 	// Преобразование задач в JSON
 	js, err := json.Marshal(allTasks)
@@ -225,8 +227,11 @@ func (ts *taskServer) getTasksByTag(w http.ResponseWriter, r *http.Request) {
 	tag := vars["tagname"]
 
 	// Получение задач по указанному тегу
-	tagTasks := ts.store.GetTasksByTag(tag)
-
+	tagTasks, err := ts.store.GetTag(tag)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError) // код ошибки 500
+		return
+	}
 	// Преобразование задач в JSON
 	js, err := json.Marshal(tagTasks)
 	if err != nil {

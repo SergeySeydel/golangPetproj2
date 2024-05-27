@@ -1,9 +1,14 @@
 package taskstore
 
 import (
+	"database/sql"
 	"fmt"
+	"log"
+	"strings"
 	"sync"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 type Task struct {
@@ -13,124 +18,341 @@ type Task struct {
 	Due  time.Time `json:"due"`
 }
 
-// TaskStore is a simple in-memory database of tasks;
 type TaskStore struct {
 	sync.Mutex
-
-	tasks  map[int]Task
-	nextId int
+	db *sql.DB
 }
 
-// TaskStore constructor
 func New() *TaskStore {
 	ts := &TaskStore{}
-	//println(ts)
-	ts.tasks = make(map[int]Task)
-	//fmt.Println(ts.tasks)
-	ts.nextId = 1
-	//fmt.Println(ts.nextId)
+
+	db, err := sql.Open("sqlite", "./tasks.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	//defer db.Close()
+	log.Println("OPENED SUCCESS")
+
+	sqlStmt := `
+		CREATE TABLE IF NOT EXISTS task (id INTEGER NOT NULL PRIMARY KEY , task TEXT, tags TEXT,  time TEXT);
+		`
+	_, err = db.Exec(sqlStmt)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ts.db = db
+
 	return ts
 }
 
-// CreateTask create a new task in the store
 func (ts *TaskStore) CreateTask(text string, tags []string, due time.Time) int {
 	ts.Lock()
 	defer ts.Unlock()
 
-	task := Task{
-		Id:   ts.nextId,
-		Text: text,
-		Due:  due}
-	task.Tags = make([]string, len(tags))
-	copy(task.Tags, tags)
-	// Сохранили task в TaskStore
-	ts.tasks[ts.nextId] = task
-	ts.nextId++
-	println()
-	println(ts)
-	return task.Id
+	tx, err := ts.db.Begin()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	stmt, err := tx.Prepare("INSERT INTO task(id, task, tags, time) VALUES(?, ?, ?, ?)")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	_, err = stmt.Exec(nil, text, strings.Join(tags, " "), due.String())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Fatal(err)
+	}
+
+	stmt, err = ts.db.Prepare("SELECT last_insert_rowid()")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	var id int
+	rows, err := stmt.Query()
+	if err != nil {
+		log.Fatal(err)
+	}
+	for rows.Next() {
+		err = rows.Scan(&id)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(id)
+	}
+
+	return id
 }
 
-// GetTask retrieves the task from taskstore by given id
 func (ts *TaskStore) GetTask(id int) (Task, error) {
 	ts.Lock()
 	defer ts.Unlock()
 
-	t, ok := ts.tasks[id]
-	if ok {
-		return t, nil
-	} else {
+	stmt, err := ts.db.Prepare("SELECT id, task, tags, time from task where id = ?")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	rows, err := stmt.Query(id)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	rowsCount := 0
+
+	var tsk Task
+	for rows.Next() {
+		var id int
+		var task string
+		var tags string
+		var tm string
+		// используем указатели для доступа к значениям
+		err = rows.Scan(&id, &task, &tags, &tm)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(id, task, tags, tm)
+
+		ptm, error := time.Parse("2006-01-02 15:04:05 Z0700 MST", tm)
+		if error != nil {
+			fmt.Println(error)
+			log.Fatal(err)
+		}
+
+		tsk = Task{
+			Id:   id,
+			Text: task,
+			Tags: []string{tags},
+			Due:  ptm}
+
+		rowsCount++
+	}
+
+	if rowsCount == 0 {
 		return Task{}, fmt.Errorf("task with id=%d not found", id)
 	}
 
+	err = rows.Err()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return tsk, nil
 }
 
-// GetAllTask retrieves all task from taskstore, in arbitrary order
+func (ts *TaskStore) GetTag(name string) ([]Task, error) {
+	ts.Lock()
+	defer ts.Unlock()
+
+	stmt, err := ts.db.Prepare("SELECT id, task, tags, time FROM task WHERE tags LIKE ?")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	name = "%" + name + "%"
+	rows, err := stmt.Query(name)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	rowsCount := 0
+	var tsk Task
+	var allTasks []Task
+
+	for rows.Next() {
+		var id int
+		var task string
+		var tags string
+		var tm string
+		err = rows.Scan(&id, &task, &tags, &tm)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(id, task, tags, tm)
+
+		ptm, error := time.Parse("2006-01-02 15:04:05 Z0700 MST", tm)
+		if error != nil {
+			fmt.Println(error)
+			log.Fatal(err)
+		}
+
+		tsk = Task{
+			Id:   id,
+			Text: task,
+			Tags: []string{tags},
+			Due:  ptm}
+
+		allTasks = append(allTasks, tsk)
+		rowsCount++
+	}
+	err = rows.Err()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if rowsCount == 0 {
+		return []Task{}, fmt.Errorf("tag with name=%v not found", name)
+	}
+
+	return allTasks, nil
+}
+
+func (ts *TaskStore) GetDue(date string) ([]Task, error) {
+	ts.Lock()
+	defer ts.Unlock()
+
+	stmt, err := ts.db.Prepare("SELECT id, task, tags, time from task where time like ?")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	date = "%" + date + "%"
+	rows, err := stmt.Query(date)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	var tsk Task
+	var allTasks []Task
+
+	rowsCount := 0
+	for rows.Next() {
+		var id int
+		var task string
+		var tags string
+		var tm string
+		err = rows.Scan(&id, &task, &tags, &tm)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(id, task, tags, tm)
+
+		ptm, error := time.Parse("2006-01-02 15:04:05 Z0700 MST", tm)
+		if error != nil {
+			fmt.Println(error)
+			log.Fatal(err)
+		}
+
+		tsk = Task{
+			Id:   id,
+			Text: task,
+			Tags: []string{tags},
+			Due:  ptm}
+
+		allTasks = append(allTasks, tsk)
+		rowsCount++
+	}
+
+	if rowsCount == 0 {
+		return []Task{}, fmt.Errorf("task with due=%v not found", date)
+	}
+
+	err = rows.Err()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return allTasks, nil
+}
+
 func (ts *TaskStore) GetAllTasks() []Task {
 	ts.Lock()
 	defer ts.Unlock()
 
-	allTasks := make([]Task, 0, len(ts.tasks))
-	for _, task := range ts.tasks {
-		allTasks = append(allTasks, task)
+	stmt, err := ts.db.Prepare("SELECT id, task, tags, time from task")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer stmt.Close()
+
+	rows, err := stmt.Query()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
+	var tsk Task
+	var allTasks []Task
+
+	rowsCount := 0
+	for rows.Next() {
+		var id int
+		var task string
+		var tags string
+		var tm string
+		err = rows.Scan(&id, &task, &tags, &tm)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(id, task, tags, tm)
+
+		ptm, error := time.Parse("2006-01-02 15:04:05 Z0700 MST", tm)
+		if error != nil {
+			fmt.Println(error)
+			log.Fatal(err)
+		}
+
+		tsk = Task{
+			Id:   id,
+			Text: task,
+			Tags: []string{tags},
+			Due:  ptm}
+
+		allTasks = append(allTasks, tsk)
+		rowsCount++
+	}
+	if rowsCount == 0 {
+		return []Task{}
+	}
+	err = rows.Err()
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	return allTasks
-
 }
 
-// DeleteAllTasks deletes all tasks in the taskstore
 func (ts *TaskStore) DeleteAllTasks() error {
 	ts.Lock()
 	defer ts.Unlock()
 
-	ts.tasks = make(map[int]Task)
+	_, err := ts.db.Exec("DELETE from task")
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	return nil
 }
 
-// DeleteTask deletes the task from taskstore by given id. If no such id exists, return Error
 func (ts *TaskStore) DeleteTask(id int) error {
 	ts.Lock()
 	defer ts.Unlock()
 
-	if _, ok := ts.tasks[id]; !ok {
-		return fmt.Errorf("task with id=%d not found", id)
+	stmt, err := ts.db.Prepare("DELETE FROM task WHERE id = ?")
+	if err != nil {
+		log.Fatal(err)
 	}
-	delete(ts.tasks, id)
+	defer stmt.Close()
+
+	rows, err := stmt.Query(id)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rows.Close()
+
 	return nil
 
-}
-
-func (ts *TaskStore) GetTasksByDueDate(year int, month time.Month, day int) []Task {
-	ts.Lock()
-	defer ts.Unlock()
-
-	var tasks []Task
-
-	for _, task := range ts.tasks {
-		y, m, d := task.Due.Date()
-		if y == year && m == month && d == day {
-			tasks = append(tasks, task)
-		}
-	}
-
-	return tasks
-}
-
-func (ts *TaskStore) GetTasksByTag(tag string) []Task {
-	ts.Lock()
-	defer ts.Unlock()
-
-	var tasks []Task
-
-taskloop:
-	for _, task := range ts.tasks {
-		for _, taskTag := range task.Tags {
-			if taskTag == tag {
-				tasks = append(tasks, task)
-				continue taskloop
-			}
-		}
-	}
-	return tasks
 }
